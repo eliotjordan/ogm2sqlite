@@ -3,8 +3,8 @@
 source "https://rubygems.org"
 
 gem "geo_combine"
-gem "openssl"
 gem "rake"
-gem "sqlite3"
-
-gem "rubocop-rails-omakase", require: false, group: [ :development ]
+gem "openssl"
+gem "sqlite3", force_ruby_platform: true
+gem "rubocop-rails-omakase", require: false
+gem "debug", ">= 1.0.0"
