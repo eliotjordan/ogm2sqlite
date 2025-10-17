@@ -20,7 +20,7 @@ class Geometry
     obj = factory.parse_wkt(geometry_as_wkt)
     RGeo::GeoJSON.encode(obj).to_json
   rescue
-    Geoblacklight.logger.warn "Geometry is not valid: #{geom}"
+    logger.warn "Geometry is not valid: #{geom}"
     default_extent
   end
 
@@ -39,7 +39,7 @@ class Geometry
     maxy = bbox.coordinates[0][2][1]
     "#{minx}, #{miny}, #{maxx}, #{maxy}"
   rescue RGeo::Error::ParseError
-    Geoblacklight.logger.warn "Error parsing geometry: #{geom}"
+    logger.warn "Error parsing geometry: #{geom}"
     default_extent
   end
 
@@ -82,5 +82,9 @@ class Geometry
     return geom unless geom.match?(/ENVELOPE/)
 
     envelope_to_polygon
+  end
+
+  def logger
+    @logger ||= Logger.new($stdout)
   end
 end

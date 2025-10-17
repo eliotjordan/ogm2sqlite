@@ -60,19 +60,20 @@ FACET_FIELDS = [
 
 Document = Struct.new(
   :id,
-  :title,
-  :creator,
-  :publisher,
-  :description,
-  :provider,
   :access_rights,
+  :creator,
+  :description,
+  :format,
+  :identifier,
+  :location,
+  :provider,
+  :publisher,
   :resource_class,
   :resource_type,
-  :theme,
   :subject,
-  :location,
-  :geometry,
-  :data
+  :temporal,
+  :theme,
+  :title,
 )
 
 SearchDocument = Struct.new(
@@ -94,13 +95,14 @@ class Ogm2sqlite
     docs_to_ingest.each do |doc|
       begin
         logger.info(doc["id"])
-        remapped_doc = remap_doc_keys(doc)
+        remapped_doc = remap_and_clean(doc)
         db.execute("insert into documents values ('#{doc["id"]}', jsonb('#{remapped_doc.to_json}'))")
         db.execute("insert into bounds values('#{coordinates(doc)}', '#{doc['id']}')")
-        rescue
-          logger.warn("Error processing: #{doc["id"]}")
-          next
-        end
+        insert_fulltext_row(remapped_doc)
+      rescue => e
+        logger.warn("Error processing: #{doc["id"]}: #{e.message}")
+        next
+      end
     end
 
     create_indexes
@@ -108,15 +110,44 @@ class Ogm2sqlite
 
   private
 
+  def remap_and_clean(doc)
+    remapped = remap_doc_keys(doc)
+    clean_values(remapped)
+  end
+
   def remap_doc_keys(doc)
-    doc.to_a.map do |k,v|
+    doc.to_a.map do |k, v|
       new_key = FIELD_MAP[k]
       if new_key
-        [new_key, v]
+        [ new_key, v ]
       else
-        [k,v]
+        [ k, v ]
       end
     end.to_h
+  end
+
+  # Strip invalid characters from json
+  def clean_values(doc)
+    doc.to_a.map do |k, v|
+      new_val = if v.is_a? Array
+                  clean_array(v)
+      elsif v.is_a? String
+                  v.gsub("'", "")
+      else
+                  v
+      end
+      [ k, new_val ]
+    end.to_h
+  end
+
+  def clean_array(value)
+    value.map do |m|
+      if m.is_a? String
+        m.gsub("'", "")
+      else
+        m
+      end
+    end
   end
 
   def harvester
@@ -134,6 +165,7 @@ class Ogm2sqlite
   def setup_tables
     setup_documents unless table_exists?("documents")
     setup_bounds unless table_exists?("bounds")
+    setup_document_store unless table_exists?("fulltext")
   end
 
   def table_exists?(table_name)
@@ -148,7 +180,55 @@ class Ogm2sqlite
     Geometry.new(doc["dcat_bbox"]).geojson
   end
 
+  def create_fulltext_struct(doc)
+    processed = format_for_fulltext(doc)
+
+    Document.new(
+      id: processed["id"],
+      access_rights: processed["access_rights"],
+      creator: processed["creator"],
+      description: processed["description"],
+      format: processed["format"],
+      identifier: processed["identifier"],
+      location: processed["location"],
+      provider: processed["provider"],
+      publisher: processed["publisher"],
+      resource_class: processed["resource_class"],
+      resource_type: processed["resource_type"],
+      subject: processed["subject"],
+      temporal: processed["temporal"],
+      theme: processed["theme"],
+      title: processed["title"],
+    )
+  end
+
+  def format_for_fulltext(doc)
+    doc.to_a.map do |k, v|
+      new_val = if v.is_a? Array
+        v.reduce { |acc, val| acc + ", " +  val.to_s }
+      else
+        v.to_s
+      end
+
+      [ k, new_val ]
+    end.to_h
+  end
+
+  def insert_fulltext_row(doc)
+    fulltext_doc = create_fulltext_struct(doc)
+    placeholders = fulltext_doc.members.map { |m| "?" }.join(", ")
+    values = fulltext_doc.values
+    query = "insert into fulltext values(#{placeholders})"
+    db.execute(query, values)
+  end
+
   def create_indexes
+    [ "id", "data" ].each do |col|
+      index_name = "documents_#{col}_idx"
+      logger.info("Creating index #{index_name}")
+      db.execute("create index #{index_name} on documents('#{col}')")
+    end
+
     INDEX_FIELDS.each do |col|
       index_name = "documents_#{col}_idx"
       logger.info("Creating index #{index_name}")
@@ -189,6 +269,28 @@ class Ogm2sqlite
   def setup_bounds
     db.execute <<-SQL
       create virtual table bounds using geopoly(id);
+    SQL
+  end
+
+  def setup_document_store
+    db.execute <<-SQL
+      create virtual table fulltext using fts5 (
+        id,
+        access_rights,
+        creator,
+        description,
+        format,
+        identifier,
+        location,
+        provider,
+        publisher,
+        resource_class,
+        resource_type,
+        subject,
+        temporal,
+        theme,
+        title
+      );
     SQL
   end
 end
