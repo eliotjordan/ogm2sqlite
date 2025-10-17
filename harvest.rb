@@ -10,6 +10,7 @@ require "faraday/net_http_persistent"
 require "geo_combine/harvester"
 require "geo_combine/indexer"
 require "geo_combine/geo_blacklight_harvester"
+load "lib/geometry.rb"
 
 Document = Struct.new(
   :id,
@@ -23,13 +24,15 @@ Document = Struct.new(
   :resource_type,
   :theme,
   :subject,
+  :location,
+  :geometry,
   :json
 )
 
 class Ogm2sqlite
   attr_reader :ogm_path, :logger, :db_path
 
-  def initialize(ogm_path: "./tmp/ogm/", db_path: "./tmp/ogm.db", logger: Logger.new($stdout))
+  def initialize(ogm_path: "./tmp/opengeometadata/", db_path: "./tmp/ogm.db", logger: Logger.new($stdout))
     @ogm_path = ogm_path
     @logger = logger
     @db_path = db_path
@@ -37,12 +40,21 @@ class Ogm2sqlite
 
   def convert
     setup_tables
+    debugger
     docs_to_ingest.each do |doc|
-      logger.info(doc["id"])
-      db.execute("insert into documents values ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )",
-                 create_document_struct(doc).to_a
-                )
+      begin
+        logger.info(doc["id"])
+        db.execute("insert into documents values ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )",
+                  create_document_struct(doc).to_a
+                  )
+        db.execute("insert into bounds values('#{coordinates(doc)}', '#{doc['id']}')")
+        rescue
+          logger.warn("Error processing: #{doc["id"]}")
+          next
+        end
     end
+
+    create_indexes
   end
 
   private
@@ -68,6 +80,14 @@ class Ogm2sqlite
     db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='#{table_name}';").any?
   end
 
+  def coordinates(doc)
+    JSON.parse(geojson(doc))["coordinates"].first.to_s
+  end
+
+  def geojson(doc)
+    Geometry.new(doc["dcat_bbox"]).geojson
+  end
+
   def create_document_struct(doc)
     Document.new(
       id: doc["id"],
@@ -81,8 +101,25 @@ class Ogm2sqlite
       resource_type: Array(doc["gbl_resourceType_sm"]).first,
       theme: Array(doc["dcat_theme_sm"]).first,
       subject: Array(doc["dct_subject_sm"]).first,
-      json: doc.to_json
+      location: Array(doc["dct_spatial_sm"]).first,
+      # geometry: geojson(doc),
+      geometry: nil,
+      # json: doc.to_json
+      json: nil
     )
+  end
+
+  def create_indexes
+    columns = Document.members.reject { |m| [:id, :geometry, :json].include?(m) }
+    columns.map(&:to_s).each do |col|
+      index_name = "documents_#{col}_idx"
+      logger.info("Creating index #{index_name}")
+      db.execute("create index #{index_name} on documents ('#{col}')")
+    end
+
+    facets = ["provider", "access_rights", "resource_class", "resource_type", "theme", "location"].map { |m| "'#{m}'" }.join(",")
+
+    db.execute("create index documents_all_idx on documents (#{facets})")
   end
 
   def setup_documents
@@ -93,12 +130,14 @@ class Ogm2sqlite
         creator text,
         publisher text,
         description text,
-        provider text,
+        provider varchar(100),
         access_rights varchar(30),
         resource_class varchar(255),
         resource_type varchar(255),
         theme varchar(255),
         subject varchar(255),
+        location varchar(255),
+        geometry text,
         json text
       );
     SQL
