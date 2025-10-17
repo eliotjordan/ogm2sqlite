@@ -12,6 +12,52 @@ require "geo_combine/indexer"
 require "geo_combine/geo_blacklight_harvester"
 load "lib/geometry.rb"
 
+FIELD_MAP = {
+  "dct_title_s" => "title",
+  "dct_creator_sm" => "creator",
+  "dct_publisher_sm" => "publisher",
+  "dct_description_sm" =>  "description",
+  "schema_provider_s" => "provider",
+  "dct_accessRights_s" => "access_rights",
+  "gbl_resourceClass_sm" => "resource_class",
+  "gbl_resourceType_sm" => "resource_type",
+  "dcat_theme_sm" => "theme",
+  "dct_subject_sm" => "subject",
+  "dct_spatial_sm" => "location",
+  "dct_format_s" => "format",
+  "dct_identifier_sm" => "identifier",
+  "dct_references_s" => "references",
+  "dct_temporal_sm" => "temporal",
+  "gbl_wxsIdentifier_s" => "wxs_identifier",
+  "gbl_mdModified_dt" => "modified",
+  "locn_geometry" => "geometry",
+  "dcat_bbox" => "bbox",
+  "gbl_indexYear_im" => "index_year"
+}
+
+INDEX_FIELDS = [
+  "title",
+  "creator",
+  "publisher",
+  "description",
+  "provider",
+  "access_rights",
+  "resource_class",
+  "resource_type",
+  "theme",
+  "subject",
+  "location"
+]
+
+FACET_FIELDS = [
+  "provider",
+  "access_rights",
+  "resource_class",
+  "resource_type",
+  "theme",
+  "location"
+]
+
 Document = Struct.new(
   :id,
   :title,
@@ -26,7 +72,12 @@ Document = Struct.new(
   :subject,
   :location,
   :geometry,
-  :json
+  :data
+)
+
+SearchDocument = Struct.new(
+  :id,
+  :data
 )
 
 class Ogm2sqlite
@@ -40,13 +91,11 @@ class Ogm2sqlite
 
   def convert
     setup_tables
-    debugger
     docs_to_ingest.each do |doc|
       begin
         logger.info(doc["id"])
-        db.execute("insert into documents values ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )",
-                  create_document_struct(doc).to_a
-                  )
+        remapped_doc = remap_doc_keys(doc)
+        db.execute("insert into documents values ('#{doc["id"]}', jsonb('#{remapped_doc.to_json}'))")
         db.execute("insert into bounds values('#{coordinates(doc)}', '#{doc['id']}')")
         rescue
           logger.warn("Error processing: #{doc["id"]}")
@@ -58,6 +107,17 @@ class Ogm2sqlite
   end
 
   private
+
+  def remap_doc_keys(doc)
+    doc.to_a.map do |k,v|
+      new_key = FIELD_MAP[k]
+      if new_key
+        [new_key, v]
+      else
+        [k,v]
+      end
+    end.to_h
+  end
 
   def harvester
     @harvester ||= GeoCombine::Harvester.new(ogm_path: ogm_path)
@@ -88,57 +148,40 @@ class Ogm2sqlite
     Geometry.new(doc["dcat_bbox"]).geojson
   end
 
-  def create_document_struct(doc)
-    Document.new(
-      id: doc["id"],
-      title: doc["dct_title_s"],
-      creator: Array(doc["dct_creator_sm"]).first,
-      publisher: Array(doc["dct_publisher_sm"]).first,
-      description: Array(doc["dct_description_sm"]).first,
-      provider: doc["schema_provider_s"],
-      access_rights: doc["dct_accessRights_s"],
-      resource_class: Array(doc["gbl_resourceClass_sm"]).first,
-      resource_type: Array(doc["gbl_resourceType_sm"]).first,
-      theme: Array(doc["dcat_theme_sm"]).first,
-      subject: Array(doc["dct_subject_sm"]).first,
-      location: Array(doc["dct_spatial_sm"]).first,
-      # geometry: geojson(doc),
-      geometry: nil,
-      # json: doc.to_json
-      json: nil
-    )
-  end
-
   def create_indexes
-    columns = Document.members.reject { |m| [:id, :geometry, :json].include?(m) }
-    columns.map(&:to_s).each do |col|
+    INDEX_FIELDS.each do |col|
       index_name = "documents_#{col}_idx"
       logger.info("Creating index #{index_name}")
-      db.execute("create index #{index_name} on documents ('#{col}')")
+      db.execute("create index #{index_name} on documents(jsonb_extract(data, '$.#{col}'))")
     end
 
-    facets = ["provider", "access_rights", "resource_class", "resource_type", "theme", "location"].map { |m| "'#{m}'" }.join(",")
+    FACET_FIELDS.permutation(2).each do |fields|
+      col1, col2 = fields
+      index_name = "documents_#{col1}_#{col2}_idx"
+      db.execute("create index #{index_name} on documents(jsonb_extract(data, '$.#{col1}'), jsonb_extract(data, '$.#{col2}'))")
 
-    db.execute("create index documents_all_idx on documents (#{facets})")
+      # Index for calculating facet counts. Right now only works for non-jsomb
+      # strings. Returns doubles like: ["Web services","Datasets"] instead of
+      # separating.
+      index_name = "documents_#{col1}_#{col2}_count_idx"
+      logger.info("Creating index #{index_name}")
+      db.execute("create index #{index_name} on documents(jsonb_extract(data, '$.#{col1}'), json_extract(data, '$.#{col2}'))")
+    end
+
+    # Index three facets. Really balloons the size of the database.
+    # FACET_FIELDS.permutation(3).each do |fields|
+    #   col1, col2, col3 = fields
+    #   index_name = "documents_#{col1}_#{col2}_#{col3}_idx"
+    #   logger.info("Creating index #{index_name}")
+    #   db.execute("create index #{index_name} on documents(jsonb_extract(json, '$.#{col1}'), jsonb_extract(json, '$.#{col2}'), jsonb_extract(json, '$.#{col3}'))")
+    # end
   end
 
   def setup_documents
     db.execute <<-SQL
       create table documents (
         id varchar(255),
-        title text,
-        creator text,
-        publisher text,
-        description text,
-        provider varchar(100),
-        access_rights varchar(30),
-        resource_class varchar(255),
-        resource_type varchar(255),
-        theme varchar(255),
-        subject varchar(255),
-        location varchar(255),
-        geometry text,
-        json text
+        data jsonb
       );
     SQL
   end
